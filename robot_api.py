@@ -1,0 +1,99 @@
+
+import time
+from IIC2 import (
+    MOTOR_TYPE,
+    set_motor_parameter,
+    control_speed,
+    control_pwm
+)
+
+# =========================
+# Configuration
+# =========================
+
+DEFAULT_SPEED = 300
+TURN_SPEED = 250          # Increased for sharper turn
+TURN_DURATION = 1.1      # Increased slightly for stronger rotation
+MOVE_DURATION = 1.0
+TURN_BOOST = 1.1          # Extra pivot strength multiplier
+
+_initialized = False
+
+
+# =========================
+# Internal Helpers
+# =========================
+
+def _initialize():
+    global _initialized
+    if not _initialized:
+        set_motor_parameter()
+        _initialized = True
+
+
+def _apply_motor_values(m1, m2, m3, m4):
+    if MOTOR_TYPE == 4:
+        control_pwm(m1, m2, m3, m4)
+    else:
+        control_speed(m1, m2, m3, m4)
+
+
+def _stop():
+    _apply_motor_values(0, 0, 0, 0)
+
+
+# =========================
+# Public API Functions
+# =========================
+
+def move_forward(speed=DEFAULT_SPEED):
+    _initialize()
+    _apply_motor_values(speed, speed, speed, speed)
+    time.sleep(MOVE_DURATION)
+    _stop()
+
+
+def move_backward(speed=DEFAULT_SPEED):
+    _initialize()
+    _apply_motor_values(-speed, -speed, -speed, -speed)
+    time.sleep(MOVE_DURATION)
+    _stop()
+
+
+def turn_left(speed=TURN_SPEED):
+    """
+    Turn left 90 degrees (sharper pivot).
+    """
+    _initialize()
+
+    boost = int(speed * TURN_BOOST)
+
+    # Stronger in-place rotation
+    _apply_motor_values(-boost, -boost, boost, boost)
+    time.sleep(TURN_DURATION)
+    _stop()
+    time.sleep(2)
+    
+    move_forward(speed)
+
+
+
+def turn_right(speed=TURN_SPEED):
+    """
+    Turn right 90 degrees (sharper pivot).
+    """
+    _initialize()
+
+    boost = int(speed * TURN_BOOST)
+
+    # Stronger in-place rotation
+    _apply_motor_values(boost, boost, -boost, -boost)
+    time.sleep(TURN_DURATION)
+    
+    _stop()
+    time.sleep(2)
+    
+    move_forward(speed)
+
+
+
