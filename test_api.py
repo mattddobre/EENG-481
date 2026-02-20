@@ -13,7 +13,7 @@ def move_square_ccw():
     move_forward()
 
     # Complete 4 left turns (each includes forward motion)
-    for i in range(1):
+    for i in range(3):
         time.sleep(0.5)
         turn_left()
 
