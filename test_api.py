@@ -1,5 +1,6 @@
 import random
 import time
+from enum import Enum
 from gpiozero import DistanceSensor
 import robot_api as robot
 
@@ -8,149 +9,175 @@ import robot_api as robot
 # Configuration
 # =========================
 
-# Motion settings
-MIN_RADIUS = 0.0
-MAX_RADIUS = 1.0
-MIN_DURATION = 0.5
-MAX_DURATION = 2.0
+OBSTACLE_DISTANCE_CM = 15
+STEP_TIME = 0.05
 
-MIN_SPEED = 200
-MAX_SPEED = 400
+MIN_SPEED = 220
+MAX_SPEED = 350
 
-STEP_TIME = 0.05   # sensor check interval (50ms)
+MAX_TURN_ANGLE = 90
+MIN_TURN_ANGLE = 15
 
-# Obstacle detection
-OBSTACLE_DISTANCE_CM = 20
-
-# Backup behavior
 BACKUP_SPEED = 250
 BACKUP_DURATION = 0.6
 
-# 180° turn calibration (tune if needed)
 TURN_AROUND_SPEED = 300
-TURN_180_DURATION = 1.8
+TURN_180_DURATION = 1.6  # Calibrate if needed
+FORWARD_CONTINUE_PROB = 0.20   # 60% chance to keep going straight
 
-# Distance sensor
 sensor = DistanceSensor(echo=24, trigger=23)
 
 
 # =========================
-# Safe Motion Function
+# State Machine
 # =========================
 
-def safe_motion(action, speed, duration, radius=None):
-    """
-    Executes motion in small time slices while continuously
-    checking for obstacles.
-    Returns False if obstacle detected.
-    """
+class State(Enum):
+    WANDER_FORWARD = 1
+    WANDER_TURN = 2
+    AVOID_BACKUP = 3
+    AVOID_TURN = 4
 
-    elapsed = 0
 
-    while elapsed < duration:
+state = State.WANDER_FORWARD
+state_timer = 0
+target_duration = 0
 
-        distance_cm = sensor.distance * 100
 
-        if distance_cm < OBSTACLE_DISTANCE_CM:
+# =========================
+# Helpers
+# =========================
+
+def obstacle_detected():
+    return sensor.distance * 100 < OBSTACLE_DISTANCE_CM
+
+
+def duration_for_angle(angle):
+    return (angle / 180.0) * TURN_180_DURATION
+
+
+def set_forward(speed):
+    robot._apply_motor_values(speed, speed, speed, speed)
+
+
+def set_pivot_left(speed):
+    left, right = robot._compute_turn_speeds(speed, 0)
+    robot._apply_motor_values(left, left, right, right)
+
+
+def set_pivot_right(speed):
+    left, right = robot._compute_turn_speeds(speed, 0)
+    robot._apply_motor_values(right, right, left, left)
+    
+def biased_turn_angle():
+    mean = 25            # center bias toward small turns
+    std_dev = 20         # spread
+
+    while True:
+        angle = random.gauss(mean, std_dev)
+
+        if MIN_TURN_ANGLE <= abs(angle) <= MAX_TURN_ANGLE:
+            return angle
+
+
+# =========================
+# Main Controller Loop
+# =========================
+
+print("Starting FSM autonomous wandering... (CTRL+C to stop)")
+
+try:
+
+    while True:
+
+        # Global obstacle interrupt (except during avoidance)
+        if state in [State.WANDER_FORWARD, State.WANDER_TURN]:
+            if obstacle_detected():
+                robot.stop()
+                state = State.AVOID_BACKUP
+                state_timer = 0
+                continue
+
+        # =========================
+        # STATE LOGIC
+        # =========================
+
+        if state == State.WANDER_FORWARD:
+
+            if state_timer == 0:
+                speed = random.randint(MIN_SPEED, MAX_SPEED)
+                target_duration = random.uniform(1,3)
+                print("STATE: FORWARD")
+            
+            set_forward(speed)
+
+            state_timer += STEP_TIME
+
+        if state_timer >= target_duration:
             robot.stop()
-            return False
+            state_timer = 0
 
-        if action == "forward":
-            robot._apply_motor_values(speed, speed, speed, speed)
+            if random.random() < FORWARD_CONTINUE_PROB:
+                # Stay in forward state
+                state = State.WANDER_FORWARD
+            else:
+                # Switch to turning
+                state = State.WANDER_TURN
 
-        elif action == "left":
-            left_speed, right_speed = robot._compute_turn_speeds(speed, abs(radius))
-            robot._apply_motor_values(left_speed, left_speed,
-                                      right_speed, right_speed)
+        elif state == State.WANDER_TURN:
 
-        elif action == "right":
-            left_speed, right_speed = robot._compute_turn_speeds(speed, -abs(radius))
-            robot._apply_motor_values(left_speed, left_speed,
-                                      right_speed, right_speed)
+            if state_timer == 0:
+                speed = random.randint(MIN_SPEED, MAX_SPEED)
+                angle = biased_turn_angle()
+                target_duration = duration_for_angle(angle)
+                turn_direction = random.choice(["left", "right"])
+                print(f"STATE: TURN {turn_direction.upper()} {angle:.1f}°")
+
+            if turn_direction == "left":
+                set_pivot_left(speed)
+            else:
+                set_pivot_right(speed)
+
+            state_timer += STEP_TIME
+
+            if state_timer >= target_duration:
+                robot.stop()
+                state = State.WANDER_FORWARD
+                state_timer = 0
+
+        elif state == State.AVOID_BACKUP:
+
+            if state_timer == 0:
+                print("STATE: AVOID_BACKUP")
+
+            robot._apply_motor_values(-BACKUP_SPEED,
+                                      -BACKUP_SPEED,
+                                      -BACKUP_SPEED,
+                                      -BACKUP_SPEED)
+
+            state_timer += STEP_TIME
+
+            if state_timer >= BACKUP_DURATION:
+                robot.stop()
+                state = State.AVOID_TURN
+                state_timer = 0
+
+        elif state == State.AVOID_TURN:
+
+            if state_timer == 0:
+                print("STATE: AVOID_TURN 180°")
+
+            set_pivot_left(TURN_AROUND_SPEED)
+
+            state_timer += STEP_TIME
+
+            if state_timer >= TURN_180_DURATION:
+                robot.stop()
+                state = State.WANDER_FORWARD
+                state_timer = 0
 
         time.sleep(STEP_TIME)
-        elapsed += STEP_TIME
 
+except KeyboardInterrupt:
+    print("\nStopping robot.")
     robot.stop()
-    return True
-
-
-# =========================
-# Obstacle Avoidance
-# =========================
-
-def avoid_obstacle():
-
-    print("Obstacle detected! Executing avoidance maneuver.")
-
-    # 1️⃣ Stop immediately
-    robot.stop()
-    time.sleep(0.2)
-
-    # 2️⃣ Back up (NO obstacle checking here)
-    print("Backing up...")
-    robot._apply_motor_values(-BACKUP_SPEED,
-                              -BACKUP_SPEED,
-                              -BACKUP_SPEED,
-                              -BACKUP_SPEED)
-    time.sleep(BACKUP_DURATION)
-    robot.stop()
-    time.sleep(0.3)
-
-    # 3️⃣ Turn 180° (pivot, no checking)
-    print("Turning 180°...")
-    left_speed, right_speed = robot._compute_turn_speeds(
-        TURN_AROUND_SPEED,
-        0   # pivot
-    )
-
-    robot._apply_motor_values(left_speed, left_speed,
-                              right_speed, right_speed)
-
-    time.sleep(TURN_180_DURATION)
-    robot.stop()
-
-    time.sleep(0.5)
-
-
-# =========================
-# Random Motion Loop
-# =========================
-
-def random_motion_loop():
-
-    print("Starting SAFE obstacle-aware wandering... (CTRL+C to stop)")
-
-    try:
-        while True:
-
-            action = random.choice(["forward", "left", "right"])
-            speed = random.randint(MIN_SPEED, MAX_SPEED)
-            duration = random.uniform(MIN_DURATION, MAX_DURATION)
-
-            if action == "forward":
-                print(f"FORWARD | speed={speed} duration={duration:.2f}")
-                success = safe_motion("forward", speed, duration)
-
-            elif action == "left":
-                radius = random.uniform(MIN_RADIUS, MAX_RADIUS)
-                print(f"LEFT | radius={radius:.2f}")
-                success = safe_motion("left", speed, duration, radius)
-
-            elif action == "right":
-                radius = random.uniform(MIN_RADIUS, MAX_RADIUS)
-                print(f"RIGHT | radius={radius:.2f}")
-                success = safe_motion("right", speed, duration, radius)
-
-            if not success:
-                avoid_obstacle()
-
-            time.sleep(0.2)
-
-    except KeyboardInterrupt:
-        print("\nStopping robot.")
-        robot.stop()
-
-
-if __name__ == "__main__":
-    random_motion_loop()
